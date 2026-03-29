@@ -31,6 +31,25 @@ Um pipeline de ingestão focado em transformar PDFs locais em dados estruturados
 8. Quando terminar, desative o ambiente com:
    `deactivate`
 
+## Instalando Ollama (CLI + servidor local)
+
+Importante: `pip install -r requirements.txt` instala apenas o cliente Python `ollama`.
+O comando de terminal `ollama` (CLI) precisa ser instalado no sistema operacional.
+
+Linux:
+`curl -fsSL https://ollama.com/install.sh | sh`
+
+macOS:
+Baixe e instale em `https://ollama.com/download`
+
+Windows:
+Baixe e instale em `https://ollama.com/download`
+
+Após instalar, valide:
+1. `ollama --version`
+2. `ollama serve`
+3. Em outro terminal, `ollama pull qwen3`
+
 
 ## Executando o pipeline
 
@@ -90,15 +109,27 @@ Se quiser testar apenas um subconjunto de PDFs, aponte `--data-dir` para uma pas
 - `src/loaders/pdf_loader.py`: responsável por localizar PDFs, fazer o parsing com PyMuPDF e, quando necessário, aplicar OCR com `unstructured.partition.pdf`.
 - `src/loaders/pipeline.py`: orquestração da ingestão (loader → storage).
 - `src/loaders/main.py`: CLI trivial que instancia o pipeline e dispara `run()`.
+- `src/chatbot/sql_tool.py`: ferramenta SQL no formato passo-a-passo (`get_database_schema`, `generate_sql_query`, `validate_sql_query`, `execute_sql_query`, `fix_sql_error`).
+- `src/chatbot/llm_client.py`: integração com LLM (via `llm`/`LLM` no `.env`) para gerar SQL e responder em português.
+- `src/chatbot/streamlit_app.py`: interface de chat com Streamlit usando `SQLTool` diretamente.
 
-## Próximos passos recomendados
+## Executando o chatbot
 
-1. Adicionar testes, logging estruturado e suporte a argumentos adicionais (e.g., buckets, flags de OCR).
-2. Verificar se alguma das dependências como `ollama`, `qwen-agent` e `streamlit` será utilizada no momento ou pode ser removida, já que o projeto só está operando na ingestão.
+1. Garanta que o parquet estruturado já existe em `data/processed/razao_contabil.parquet`.
+2. Baixe o modelo no Ollama (uma vez por máquina):
+   `ollama pull qwen3`
+3. Verifique se o modelo está disponível:
+   `ollama list`
+4. Garanta que o servidor Ollama está ativo:
+   `ollama serve`
+5. Configure o modelo no `.env`:
+   `llm=qwen3`
+6. Rode o app:
+   `streamlit run src/chatbot/streamlit_app.py`
 
-## Licença
+O chatbot usa instruções em português para gerar SQL no DuckDB com base na tabela `lancamentos`.
+Antes de executar, a SQL é validada para permitir apenas leitura (`SELECT/CTE`) e bloquear comandos destrutivos.
 
-Este repositório não declara formalmente uma licença. Adicione o arquivo `LICENSE` se precisar definir um termo de uso.
 
 
 source ../../venv/chatbotduckdb/bin/activate

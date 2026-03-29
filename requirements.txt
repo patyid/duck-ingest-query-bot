@@ -5,8 +5,10 @@ pydantic-settings>=2.2
 boto3>=1.30.0
 
 # LangChain + ingestion
+langchain>=0.2.0
 langchain-core>=0.1.37
 langchain-community>=0.2.1
+langchain-ollama>=0.1.0
 PyMuPDF>=1.23.0
 pandas>=2.1.0
 duckdb>=1.4.4

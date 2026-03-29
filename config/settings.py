@@ -34,55 +34,6 @@ def _bootstrap_env() -> None:
         load_dotenv(dotenv_path=DOTENV_PATH, override=False)
         return
 
-    # 2) AWS: `.env` ausente -> buscar no Parameter Store (se ainda não estiver setado).
-    if os.getenv("OPENAI_API_KEY"):
-        return
-
-    logger.info(
-        "Arquivo `.env` não encontrado; assumindo execução na AWS. "
-        "Buscando OPENAI_API_KEY no SSM Parameter Store: %s",
-        OPENAI_SSM_PARAMETER_NAME,
-    )
-    print(
-        "Arquivo `.env` não encontrado; assumindo execução na AWS. "
-        f"Buscando OPENAI_API_KEY no SSM Parameter Store: {OPENAI_SSM_PARAMETER_NAME}",
-        flush=True,
-    )
-
-    try:
-        import boto3
-    except Exception as exc:  # pragma: no cover
-        raise RuntimeError(
-            "boto3 não está disponível para buscar a chave no SSM Parameter Store."
-        ) from exc
-
-    region = (
-        os.getenv("AWS_REGION")
-        or os.getenv("AWS_DEFAULT_REGION")
-        or "us-east-1"
-    )
-
-    client = boto3.client("ssm", region_name=region)
-    try:
-        resp = client.get_parameter(
-            Name=OPENAI_SSM_PARAMETER_NAME,
-            WithDecryption=True,
-        )
-    except Exception as exc:
-        raise RuntimeError(
-            "Falha ao buscar OPENAI_API_KEY no SSM Parameter Store "
-            f"({OPENAI_SSM_PARAMETER_NAME}) na região {region}. "
-            "Verifique IAM role/permissions e se o parâmetro existe."
-        ) from exc
-
-    value = (resp.get("Parameter") or {}).get("Value")
-    if not value:
-        raise RuntimeError(
-            f"Parâmetro SSM {OPENAI_SSM_PARAMETER_NAME} retornou vazio."
-        )
-
-    os.environ["OPENAI_API_KEY"] = value
-
 class Settings(BaseSettings):
     # OpenAI (opcional, só necessário para embeddings/LLM)
     openai_api_key: Optional[str] = Field(
