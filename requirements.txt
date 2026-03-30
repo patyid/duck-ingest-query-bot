@@ -17,6 +17,7 @@ python-snappy>=0.6.1
 unstructured[all-docs]>=0.7.3
 openai>=1.0.0
 faiss-cpu>=1.7.4
+sentence-transformers>=3.0.0
 
 # LLM clients and apps requested
 ollama>=0.1.0

@@ -1,6 +1,6 @@
 # Duck Ingest Query Bot
 
-Um pipeline de ingestão focado em transformar PDFs locais em dados estruturados prontos para análise e construção de vetores (duckdb + RAG).
+Um pipeline de ingestão focado em transformar PDFs locais em dados estruturados prontos para análise SQL no DuckDB e busca semântica com índice vetorial.
 
 ## Overview
 
@@ -55,15 +55,27 @@ Após instalar, valide:
 
 1. Coloque os PDFs que deseja processar em `data/raw` (pode organizar em subpastas).
 2. Rode `python src/loaders/main.py --data-dir data/raw`.
-3. O script imprime o progresso de cada PDF, aplica OCR quando necessário e gera dois Parquets:
+3. O script imprime o progresso de cada PDF, aplica OCR quando necessário e gera:
    - `data/processed/ingestion.parquet` (bruto por página)
    - `data/processed/razao_contabil.parquet` (estruturado por lançamento contábil)
+   - `data/processed/semantic_terms.faiss` e `data/processed/semantic_terms.json` (índice vetorial + metadados)
 
 ### Exemplo de execução
 
 ```
 python src/loaders/main.py --data-dir ./data/raw --data-processed ./data/processed/ingestion.parquet
+```
 
+Com indexação semântica explícita:
+
+```bash
+python src/loaders/main.py \
+  --data-dir data/raw \
+  --data-structured data/processed/razao_contabil.parquet \
+  --semantic-enabled \
+  --semantic-model-name paraphrase-multilingual-mpnet-base-v2 \
+  --semantic-index-path data/processed/semantic_terms.faiss \
+  --semantic-terms-path data/processed/semantic_terms.json
 ```
 
 ### Query em colunas no DuckDB
@@ -77,7 +89,7 @@ SELECT
   valor,
   total_debito
 FROM 'data/processed/razao_contabil.parquet'
-WHERE cnpj = '08.244.460/0001-77'
+WHERE cnpj = '99.999.999/9999-99'
 ORDER BY conta_codigo, data_lancamento;
 ```
 
@@ -100,7 +112,7 @@ Se quiser testar apenas um subconjunto de PDFs, aponte `--data-dir` para uma pas
 
 ### Observações
 
-- O parser aceita `--data-dir`, `--data-processed`, `--data-structured` e `--structured-columns`.
+- O parser aceita `--data-dir`, `--data-processed`, `--data-structured`, `--structured-columns` e flags semânticas.
 - `IngestionPipeline` usa o `PDFLoader` e salva o DataFrame final via `pandas.to_parquet(..., engine="pyarrow", compression="snappy")`.
 
 
@@ -109,8 +121,8 @@ Se quiser testar apenas um subconjunto de PDFs, aponte `--data-dir` para uma pas
 - `src/loaders/pdf_loader.py`: responsável por localizar PDFs, fazer o parsing com PyMuPDF e, quando necessário, aplicar OCR com `unstructured.partition.pdf`.
 - `src/loaders/pipeline.py`: orquestração da ingestão (loader → storage).
 - `src/loaders/main.py`: CLI trivial que instancia o pipeline e dispara `run()`.
+- `src/loaders/semantic_indexer.py`: geração de índice vetorial FAISS e metadados de termos semânticos.
 - `src/chatbot/sql_tool.py`: ferramenta SQL no formato passo-a-passo (`get_database_schema`, `generate_sql_query`, `validate_sql_query`, `execute_sql_query`, `fix_sql_error`).
-- `src/chatbot/llm_client.py`: integração com LLM (via `llm`/`LLM` no `.env`) para gerar SQL e responder em português.
 - `src/chatbot/streamlit_app.py`: interface de chat com Streamlit usando `SQLTool` diretamente.
 
 ## Executando o chatbot
@@ -130,6 +142,58 @@ Se quiser testar apenas um subconjunto de PDFs, aponte `--data-dir` para uma pas
 O chatbot usa instruções em português para gerar SQL no DuckDB com base na tabela `lancamentos`.
 Antes de executar, a SQL é validada para permitir apenas leitura (`SELECT/CTE`) e bloquear comandos destrutivos.
 
+### Matching semântico (PT-BR)
 
+O `SQLTool` usa o índice vetorial persistido gerado na ingestão para expandir termos textuais (por exemplo, `telefone` -> `telefonia`), sem criar embeddings em tempo real no chatbot.
 
-source ../../venv/chatbotduckdb/bin/activate
+Configuração opcional via `.env`:
+- `SEMANTIC_MATCH_ENABLED=true` habilita/desabilita o matcher semântico (default: `true`).
+- `SEMANTIC_MODEL_NAME=paraphrase-multilingual-mpnet-base-v2` define o modelo de embeddings.
+- `SEMANTIC_INDEX_PATH=data/processed/semantic_terms.faiss` caminho do índice vetorial.
+- `SEMANTIC_TERMS_PATH=data/processed/semantic_terms.json` caminho dos termos/metadados.
+- `SEMANTIC_LOCAL_FILES_ONLY=true` evita download de modelo em runtime.
+- Se o índice vetorial não existir, o chatbot cai automaticamente para matching lexical.
+
+### Sequência de execução (Mermaid)
+
+```mermaid
+sequenceDiagram
+    participant U as Usuário
+    participant P as Pipeline Ingestão
+    participant V as Vetor FAISS + JSON
+    participant S as Streamlit App
+    participant T as SQLTool
+    participant D as DuckDB (lancamentos)
+    participant L as LLM Agent (Ollama)
+
+    P->>V: Gera índice semântico persistido
+
+    U->>S: Envia pergunta em português
+    S->>T: ask(question)
+    T->>T: reset debug state
+    T->>V: Carrega índice vetorial persistido (se existir)
+    T->>T: Extrai termos e aplica expansão semântica via índice
+    alt intenção list/total + filtro textual
+        T->>D: executa SQL determinística (read-only)
+        D-->>T: DataFrame
+        T-->>S: resposta + SQL executada + trace
+    else sem fallback determinístico
+        T->>L: fluxo get_schema -> generate -> validate -> execute -> fix
+        L->>D: SELECT validada
+        D-->>L: resultado
+        L-->>T: resposta final
+        T-->>S: resposta + SQL executada + trace
+    end
+    S-->>U: Mostra resposta no chat
+```
+
+### Modo debug (SELECTs gerados)
+
+1. Inicie o app:
+   `streamlit run src/chatbot/streamlit_app.py`
+2. Na sidebar, habilite:
+   `Modo debug (mostrar SELECTs gerados)`
+3. Faça uma pergunta no chat.
+4. Em cada resposta, abra:
+   - `SELECTs gerados (N)` para ver as tentativas de SQL.
+   - `Trace debug` para ver validação e execução.

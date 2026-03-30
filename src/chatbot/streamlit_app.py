@@ -34,6 +34,7 @@ sql_tool = build_sql_tool(settings.data_structured)
 with st.sidebar:
     st.subheader("Configuração")
     st.write(f"Arquivo de dados: `{settings.data_structured}`")
+    debug_mode = st.checkbox("Modo debug (mostrar SELECTs gerados)", value=False)
 
     with st.expander("Schema disponível"):
         st.text(sql_tool.schema_description())
@@ -41,8 +42,16 @@ with st.sidebar:
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
-        if message.get("sql"):
+        if debug_mode and message.get("sql"):
             st.code(message["sql"], language="sql")
+        if debug_mode and message.get("generated_sqls"):
+            with st.expander(f"SELECTs gerados ({len(message['generated_sqls'])})", expanded=False):
+                for idx, generated_sql in enumerate(message["generated_sqls"], start=1):
+                    st.caption(f"Tentativa {idx}")
+                    st.code(generated_sql, language="sql")
+        if debug_mode and message.get("debug_trace"):
+            with st.expander("Trace debug", expanded=False):
+                st.text("\n".join(message["debug_trace"]))
 
 question = st.chat_input("Ex.: Qual o total de débito por conta?")
 if question:
@@ -55,14 +64,25 @@ if question:
             try:
                 response = sql_tool.ask(question)
                 st.markdown(response.answer)
-                with st.expander(f"SQL executado ({response.row_count} linhas)", expanded=False):
-                    st.code(response.sql, language="sql")
+                if debug_mode:
+                    with st.expander(f"SQL executado ({response.row_count} linhas)", expanded=False):
+                        st.code(response.sql, language="sql")
+                if debug_mode and response.generated_sqls:
+                    with st.expander(f"SELECTs gerados ({len(response.generated_sqls)})", expanded=False):
+                        for idx, generated_sql in enumerate(response.generated_sqls, start=1):
+                            st.caption(f"Tentativa {idx}")
+                            st.code(generated_sql, language="sql")
+                if debug_mode and response.debug_trace:
+                    with st.expander("Trace debug", expanded=False):
+                        st.text("\n".join(response.debug_trace))
 
                 st.session_state.messages.append(
                     {
                         "role": "assistant",
                         "content": response.answer,
                         "sql": response.sql,
+                        "generated_sqls": response.generated_sqls,
+                        "debug_trace": response.debug_trace,
                     }
                 )
             except Exception as exc:

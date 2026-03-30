@@ -38,6 +38,33 @@ def main():
             "Ex.: cabecalho,periodo_inicio,cnpj,conta_codigo,data_lancamento,historico,valor,total_debito"
         ),
     )
+    parser.add_argument(
+        "--semantic-index-path",
+        default=None,
+        help="Caminho de saída do índice vetorial FAISS (default: data/processed/semantic_terms.faiss).",
+    )
+    parser.add_argument(
+        "--semantic-terms-path",
+        default=None,
+        help="Caminho do arquivo JSON com termos/metadados do índice semântico.",
+    )
+    parser.add_argument(
+        "--semantic-model-name",
+        default=None,
+        help="Modelo Sentence Transformers para indexação semântica.",
+    )
+    parser.add_argument(
+        "--semantic-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Habilita/desabilita criação do índice semântico.",
+    )
+    parser.add_argument(
+        "--semantic-local-files-only",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Força uso apenas de modelos locais (sem download).",
+    )
 
     args = parser.parse_args()
     structured_columns = _parse_structured_columns(args.structured_columns)
@@ -47,6 +74,11 @@ def main():
         data_processed=args.data_processed,
         data_structured=args.data_structured,
         structured_columns=structured_columns,
+        semantic_index_path=args.semantic_index_path,
+        semantic_terms_path=args.semantic_terms_path,
+        semantic_model_name=args.semantic_model_name,
+        semantic_enabled=args.semantic_enabled,
+        semantic_local_files_only=args.semantic_local_files_only,
     )
     pipeline.run()
 
