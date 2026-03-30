@@ -633,6 +633,11 @@ Corrija a SQL mantendo as regras:
             any(token in normalized for token in ("total", "soma", "somar"))
             and "debito" in normalized
         )
+        total_gasto_intent = (
+            any(token in normalized for token in ("total", "soma", "somar"))
+            and any(token in normalized for token in ("gasto", "gastos", "valor", "valores"))
+            and "debito" not in normalized
+        )
 
         if total_debito_intent:
             sql = f"""
@@ -651,6 +656,35 @@ WHERE {text_filter}
             total_num = float(total) if total is not None else 0.0
             return {
                 "answer": f"Total de débito para filtro textual ({', '.join(terms)}): {total_num:.2f} ({linhas} linhas).",
+                "sql": self._last_executed_sql,
+                "row_count": self._last_row_count,
+                "generated_sqls": self._generated_sqls,
+                "debug_trace": self._debug_trace,
+            }
+
+        if total_gasto_intent:
+            sql = f"""
+SELECT
+  SUM(ABS(valor)) AS total_gasto,
+  SUM(valor) AS saldo_valor,
+  COUNT(*) AS linhas
+FROM lancamentos
+WHERE {text_filter}
+""".strip()
+            self._track_generated_sql(sql, "rule_based")
+            df = self.execute_sql_query(sql, max_rows=200)
+            if df.empty:
+                return None
+            total = df.iloc[0].get("total_gasto")
+            saldo = df.iloc[0].get("saldo_valor")
+            linhas = int(df.iloc[0].get("linhas", 0))
+            total_num = float(total) if total is not None else 0.0
+            saldo_num = float(saldo) if saldo is not None else 0.0
+            return {
+                "answer": (
+                    f"Total gasto para filtro textual ({', '.join(terms)}): {total_num:.2f} "
+                    f"(saldo em valor: {saldo_num:.2f}; {linhas} linhas)."
+                ),
                 "sql": self._last_executed_sql,
                 "row_count": self._last_row_count,
                 "generated_sqls": self._generated_sqls,
