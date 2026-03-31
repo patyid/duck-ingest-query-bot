@@ -15,6 +15,20 @@ if str(src_root) not in sys.path:
 from chatbot.sql_tool import SQLTool
 from config.settings import settings
 
+"""
+Módulo da aplicação Streamlit para o chatbot DuckDB.
+
+Esta aplicação fornece uma interface de chat interativa onde os usuários podem fazer perguntas
+em português sobre dados contábeis armazenados em um arquivo Parquet estruturado.
+O chatbot utiliza o SQLTool para gerar e executar consultas SQL no DuckDB,
+com suporte opcional a busca semântica e modo debug para visualizar as consultas geradas.
+
+Funcionalidades principais:
+- Chat interativo com histórico de mensagens
+- Integração com SQLTool para geração de SQL baseada em LLM
+- Modo debug para visualizar consultas SQL geradas e traces
+- Exibição do schema da base de dados na sidebar
+"""
 
 st.set_page_config(page_title="Chatbot DuckDB", page_icon="🦆", layout="wide")
 st.title("Chatbot DuckDB")
@@ -23,22 +37,39 @@ st.caption("Faça perguntas em português sobre os dados contábeis.")
 
 @st.cache_resource
 def build_sql_tool(parquet_path: str) -> SQLTool:
+    """
+    Cria e retorna uma instância do SQLTool configurada para o arquivo Parquet especificado.
+
+    Esta função é decorada com @st.cache_resource para otimizar o desempenho,
+    evitando recriar o SQLTool a cada interação.
+
+    Args:
+        parquet_path (str): Caminho absoluto para o arquivo Parquet estruturado
+                           contendo os dados contábeis.
+
+    Returns:
+        SQLTool: Instância configurada do SQLTool pronta para processar perguntas.
+    """
     return SQLTool(parquet_path=parquet_path)
 
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+# Instancia o SQLTool usando o cache para evitar recriações desnecessárias
 sql_tool = build_sql_tool(settings.data_structured)
 
+# Configura a sidebar com informações de configuração e schema
 with st.sidebar:
     st.subheader("Configuração")
     st.write(f"Arquivo de dados: `{settings.data_structured}`")
+    st.write(f"Modelo LLM: `{sql_tool.llm_description()}`")
     debug_mode = st.checkbox("Modo debug (mostrar SELECTs gerados)", value=False)
 
     with st.expander("Schema disponível"):
         st.text(sql_tool.schema_description())
 
+# Renderiza o histórico de mensagens do chat
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
@@ -53,15 +84,19 @@ for message in st.session_state.messages:
             with st.expander("Trace debug", expanded=False):
                 st.text("\n".join(message["debug_trace"]))
 
+# Captura a entrada do usuário via chat input
 question = st.chat_input("Ex.: Qual o total de débito por conta?")
 if question:
+    # Adiciona a pergunta do usuário ao histórico de mensagens
     st.session_state.messages.append({"role": "user", "content": question})
     with st.chat_message("user"):
         st.markdown(question)
 
+    # Processa a resposta do assistente
     with st.chat_message("assistant"):
         with st.spinner("Consultando dados..."):
             try:
+                # Executa a consulta usando o SQLTool
                 response = sql_tool.ask(question)
                 st.markdown(response.answer)
                 if debug_mode:
@@ -76,6 +111,7 @@ if question:
                     with st.expander("Trace debug", expanded=False):
                         st.text("\n".join(response.debug_trace))
 
+                # Adiciona a resposta bem-sucedida ao histórico
                 st.session_state.messages.append(
                     {
                         "role": "assistant",
@@ -86,6 +122,7 @@ if question:
                     }
                 )
             except Exception as exc:
+                # Trata erros ocorridos durante a consulta
                 error_message = f"Não consegui concluir a consulta: {exc}"
                 st.error(error_message)
                 st.session_state.messages.append(

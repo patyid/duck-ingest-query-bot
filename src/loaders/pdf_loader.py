@@ -5,6 +5,20 @@ from langchain_core.documents import Document
 
 import pandas as pd
 
+"""
+Módulo para carregamento e processamento de PDFs.
+
+Este módulo fornece funcionalidades para carregar PDFs de um diretório,
+extrair texto de cada página e detectar quando é necessário aplicar OCR
+para documentos de imagem. Suporta carregamento recursivo de diretórios
+e conversão dos dados para um DataFrame padronizado.
+
+Funcionalidades principais:
+- Carregamento de PDFs usando PyMuPDF para texto nativo
+- Detecção automática de PDFs de imagem e aplicação de OCR com Unstructured
+- Normalização de metadados e conteúdo de página
+- Output em DataFrame com schema consistente para processamento posterior
+"""
 
 METADATA_SCHEMA_KEYS = [
     "author",
@@ -161,18 +175,46 @@ class PDFLoader:
         return {key: normalized.get(key) for key in METADATA_SCHEMA_KEYS}
 
     def _normalize_page_content(self, page_content: Any) -> str:
-        """Mantém layout textual da página com quebras de linha estáveis."""
+        """
+        Normaliza o conteúdo da página mantendo quebras de linha consistentes.
+
+        Converte quebras de linha do Windows/Mac para Unix e remove espaços extras.
+
+        Args:
+            page_content: Conteúdo da página como string ou None.
+
+        Returns:
+            Conteúdo normalizado como string.
+        """
         text = "" if page_content is None else str(page_content)
         return text.replace("\r\n", "\n").replace("\r", "\n").strip()
 
     @staticmethod
     def _as_string(value: Any) -> str:
+        """
+        Converte valor para string de forma segura.
+
+        Args:
+            value: Valor a ser convertido.
+
+        Returns:
+            String vazia se None, caso contrário str(value).
+        """
         if value is None:
             return ""
         return str(value)
 
     @staticmethod
     def _as_int(value: Any):
+        """
+        Converte valor para int de forma segura.
+
+        Args:
+            value: Valor a ser convertido.
+
+        Returns:
+            None se valor vazio ou conversão falhar, caso contrário int(value).
+        """
         if value in (None, ""):
             return None
         try:

@@ -18,6 +18,11 @@ except Exception:  # pragma: no cover
     from langchain_community.chat_models import ChatOllama
 
 try:  # pragma: no cover
+    from langchain_openai import ChatOpenAI
+except Exception:  # pragma: no cover
+    ChatOpenAI = None
+
+try:  # pragma: no cover
     import faiss
 except Exception:  # pragma: no cover
     faiss = None
@@ -80,6 +85,8 @@ class SQLTool:
         self._semantic_model: Any = None
         self._semantic_index: Any = None
         self._semantic_terms: list[str] = []
+        self._llm_provider_name = "ollama"
+        self._llm_model_name = os.getenv("LLM") or os.getenv("llm") or "qwen3"
         self._register_views()
         self._init_semantic_matcher()
 
@@ -139,12 +146,43 @@ class SQLTool:
         )
 
     def _build_llm(self):
-        # Setup do modelo no mesmo formato do exemplo de referência.
+        # Provider pode ser forçado via LLM_PROVIDER=openai|ollama.
+        llm_provider = (os.getenv("LLM_PROVIDER") or "").strip().lower()
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        openai_model = (
+            os.getenv("OPENAI_MODEL")
+            or os.getenv("LLM")
+            or os.getenv("llm")
+            or "gpt-4.1-mini"
+        )
+        use_openai = llm_provider == "openai" or (
+            llm_provider == "" and bool(openai_api_key)
+        )
+
+        if use_openai:
+            if ChatOpenAI is None:
+                raise RuntimeError(
+                    "Para usar OpenAI, instale `langchain-openai` "
+                    "(ex.: pip install langchain-openai)."
+                )
+            self._llm_provider_name = "openai"
+            self._llm_model_name = openai_model
+            return ChatOpenAI(
+                model=openai_model,
+                temperature=0,
+            )
+
+        # Setup padrão com Ollama.
+        self._llm_provider_name = "ollama"
+        self._llm_model_name = os.getenv("LLM") or os.getenv("llm") or "qwen3"
         return ChatOllama(
             model=os.getenv("LLM") or os.getenv("llm") or "qwen3",
             base_url="http://localhost:11434",
             temperature=0,
         )
+
+    def llm_description(self) -> str:
+        return f"{self._llm_provider_name}:{self._llm_model_name}"
 
     def schema_description(self) -> str:
         # Converte o DESCRIBE em texto para alimentar prompts e inspeção.
@@ -252,6 +290,16 @@ Regras:
             "mostra",
             "mostre",
             "mostrar",
+            "ordem",
+            "ordenado",
+            "ordenada",
+            "ordenar",
+            "crescente",
+            "decrescente",
+            "asc",
+            "desc",
+            "ascendente",
+            "descendente",
             "conta",
             "contas",
             "lancamento",

@@ -142,6 +142,45 @@ Se quiser testar apenas um subconjunto de PDFs, aponte `--data-dir` para uma pas
 O chatbot usa instruções em português para gerar SQL no DuckDB com base na tabela `lancamentos`.
 Antes de executar, a SQL é validada para permitir apenas leitura (`SELECT/CTE`) e bloquear comandos destrutivos.
 
+### Usando OpenAI Mini no chatbot
+
+Exemplo de `.env` para usar OpenAI no lugar de Ollama:
+
+```env
+OPENAI_API_KEY=...
+LLM_PROVIDER=openai
+OPENAI_MODEL=gpt-4.1-mini
+```
+
+Regra de seleção do provider no `SQLTool`:
+1. `LLM_PROVIDER=openai` força OpenAI.
+2. `LLM_PROVIDER=ollama` força Ollama.
+3. Sem `LLM_PROVIDER`:
+   - se `OPENAI_API_KEY` existir, usa OpenAI;
+   - senão, usa Ollama.
+
+Resolução do modelo:
+- OpenAI: `OPENAI_MODEL` (fallback: `LLM`/`llm`, fallback final `gpt-4.1-mini`).
+- Ollama: `LLM`/`llm` (fallback final `qwen3`).
+
+Exemplos rápidos:
+
+```env
+# Forçar local
+LLM_PROVIDER=ollama
+LLM=qwen3:4b
+```
+
+```env
+# Forçar OpenAI
+LLM_PROVIDER=openai
+OPENAI_MODEL=gpt-4.1-mini
+```
+
+Observação sobre vetores:
+- trocar apenas o LLM (Ollama -> OpenAI) não exige reindexar vetores;
+- só reindexe se trocar o modelo de embeddings da etapa de indexação semântica.
+
 ### Matching semântico (PT-BR)
 
 O `SQLTool` usa o índice vetorial persistido gerado na ingestão para expandir termos textuais (por exemplo, `telefone` -> `telefonia`), sem criar embeddings em tempo real no chatbot.
@@ -197,3 +236,6 @@ sequenceDiagram
 4. Em cada resposta, abra:
    - `SELECTs gerados (N)` para ver as tentativas de SQL.
    - `Trace debug` para ver validação e execução.
+
+
+source ../../venv/chatbotduckdb/bin/activate

@@ -4,20 +4,53 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+"""
+Script principal para executar o pipeline de ingestão de PDFs.
+
+Este módulo fornece uma interface de linha de comando (CLI) para processar PDFs localizados
+em um diretório especificado, extrair dados estruturados e opcionalmente gerar um índice
+semântico vetorial. O resultado é armazenado em arquivos Parquet para análise posterior
+no DuckDB.
+
+O pipeline inclui:
+- Carregamento e parsing de PDFs com suporte a OCR
+- Extração de dados contábeis estruturados
+- Geração opcional de índice semântico FAISS para busca textual
+"""
+
 
 def _parse_structured_columns(raw_columns: Optional[str]) -> Optional[List[str]]:
+    """
+    Converte uma string de colunas separadas por vírgula em uma lista de strings.
+
+    Args:
+        raw_columns (Optional[str]): String contendo nomes de colunas separados por vírgula,
+                                   ou None se não especificado.
+
+    Returns:
+        Optional[List[str]]: Lista de nomes de colunas limpos, ou None se entrada for None.
+    """
     if raw_columns is None:
         return None
     return [col.strip() for col in raw_columns.split(",")]
 
 
 def main():
+    """
+    Função principal que configura o parser de argumentos e executa o pipeline de ingestão.
+
+    Esta função:
+    - Configura o caminho do projeto no sys.path
+    - Define os argumentos da CLI com valores padrão
+    - Instancia e executa o IngestionPipeline com os parâmetros fornecidos
+    """
     project_root = Path(__file__).resolve().parents[2]
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
 
     from pipeline import IngestionPipeline
 
+    # Configura o parser de argumentos da linha de comando
     parser = argparse.ArgumentParser(description="Pipeline de injestão de PDFs para duckdb")
     parser.add_argument("--data-dir", default="data/raw", help="Diretório dos PDFs")
     parser.add_argument(
@@ -66,9 +99,11 @@ def main():
         help="Força uso apenas de modelos locais (sem download).",
     )
 
+    # Faz o parsing dos argumentos fornecidos
     args = parser.parse_args()
     structured_columns = _parse_structured_columns(args.structured_columns)
 
+    # Instancia e executa o pipeline de ingestão com os parâmetros configurados
     pipeline = IngestionPipeline(
         data_dir=args.data_dir,
         data_processed=args.data_processed,

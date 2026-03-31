@@ -6,6 +6,15 @@ from typing import Optional
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+"""
+Módulo de configurações da aplicação.
+
+Este módulo define todas as configurações da aplicação usando Pydantic Settings.
+Carrega variáveis de ambiente de um arquivo .env local ou de variáveis de sistema/AWS.
+Fornece configurações para OpenAI, AWS S3, pipeline de processamento e caminhos de dados.
+
+As configurações são acessíveis globalmente através da instância `settings`.
+"""
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +44,14 @@ def _bootstrap_env() -> None:
         return
 
 class Settings(BaseSettings):
+    """
+    Configurações da aplicação usando Pydantic.
+
+    Define campos para APIs externas (OpenAI), infraestrutura (AWS S3),
+    parâmetros do pipeline e caminhos de arquivos. Valores padrão são
+    fornecidos para desenvolvimento local.
+    """
+
     # OpenAI (opcional, só necessário para embeddings/LLM)
     openai_api_key: Optional[str] = Field(
         default=None,

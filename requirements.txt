@@ -8,6 +8,7 @@ boto3>=1.30.0
 langchain>=0.2.0
 langchain-core>=0.1.37
 langchain-community>=0.2.1
+langchain-openai>=0.1.0
 langchain-ollama>=0.1.0
 PyMuPDF>=1.23.0
 pandas>=2.1.0
