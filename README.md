@@ -116,6 +116,222 @@ Se quiser testar apenas um subconjunto de PDFs, aponte `--data-dir` para uma pas
 - `IngestionPipeline` usa o `PDFLoader` e salva o DataFrame final via `pandas.to_parquet(..., engine="pyarrow", compression="snappy")`.
 
 
+## Pipeline de Ingestão Detalhada
+
+O pipeline de ingestão é composto por três etapas principais executadas sequencialmente: **Carregamento de PDFs**, **Parsing Estruturado** e **Indexação Semântica**. Cada etapa é modular e pode ser configurada independentemente.
+
+### 1. Carregamento de PDFs (`PDFLoader`)
+
+**Objetivo**: Extrair texto de documentos PDF, incluindo suporte a OCR para PDFs de imagem.
+
+**Processo detalhado**:
+1. **Descoberta de arquivos**: Varre recursivamente o diretório `data/raw` procurando por arquivos `.pdf`
+2. **Extração de texto nativo**: Usa PyMuPDF para extrair texto diretamente dos PDFs
+3. **Detecção de PDFs de imagem**: Conta caracteres extraídos; se < 100 caracteres, considera PDF de imagem
+4. **Aplicação de OCR**: Para PDFs de imagem, usa `unstructured.partition.pdf` com estratégia `hi_res` e idioma português
+5. **Normalização**: Padroniza metadados (autor, data, página, etc.) e conteúdo de texto
+6. **Consolidação**: Junta todas as páginas em um único DataFrame pandas
+
+**Saídas**:
+- DataFrame com colunas: `id`, `metadata`, `page_content`, `type`
+- Metadados incluem: `source`, `page`, `total_pages`, `author`, `creationDate`, etc.
+
+**Configuração**:
+- `use_ocr=True` (padrão): Habilita OCR automático
+- Requer `unstructured[all-docs]` para OCR (opcional)
+
+**Tratamento de erros**:
+- PDFs corrompidos são pulados com aviso
+- Falha no OCR cai para texto nativo (se disponível)
+
+### 2. Parsing Estruturado (`ledger_parser`)
+
+**Objetivo**: Converter texto bruto de páginas PDF em dados estruturados de lançamentos contábeis.
+
+**Algoritmo de parsing**:
+1. **Identificação de cabeçalho**: Busca padrão "RAZÃO POR CONTA CONTÁBIL"
+2. **Extração de metadados globais**:
+   - Período base (formato DD/MM/YYYY a DD/MM/YYYY)
+   - CNPJ (formato XX.XXX.XXX/XXXX-XX)
+3. **Parsing linha-a-linha** usando máquina de estados:
+   - **Estado conta**: Detecta códigos de conta (XX.XX.XX) seguidos de nome
+   - **Estado data**: Identifica datas de lançamento (DD/MM/YYYY)
+   - **Estado histórico**: Coleta texto descritivo até encontrar valor
+   - **Estado valor**: Extrai valores monetários (formato brasileiro: 1.234,56)
+4. **Associação de totais**: Valores de "Total débito" são retro-associados aos lançamentos da conta
+5. **Validação**: Verifica consistência de dados e formatação
+
+**Estrutura de dados resultante**:
+```python
+{
+    'cabecalho': str,           # Título do documento
+    'periodo_inicio': str,      # Data início (DD/MM/YYYY)
+    'periodo_fim': str,         # Data fim (DD/MM/YYYY)
+    'cnpj': str,                # CNPJ formatado
+    'conta_codigo': str,        # Código da conta (XX.XX.XX)
+    'conta_nome': str,          # Nome da conta
+    'data_lancamento': str,     # Data do lançamento
+    'historico': str,           # Descrição do lançamento
+    'valor': float,             # Valor do lançamento
+    'total_debito': float,      # Total de débito da conta
+    'arquivo': str,             # Nome do arquivo PDF
+    'source': str,              # Caminho completo do PDF
+    'pagina': int               # Número da página
+}
+```
+
+**Expressões regulares utilizadas**:
+- `PERIODO_RE`: `r"Período base:\s*(\d{2}/\d{2}/\d{4})\s*a\s*(\d{2}/\d{2}/\d{4})"`
+- `CNPJ_RE`: `r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}"`
+- `CONTA_RE`: `r"^(\d{2}\.\d{2}\.\d{2})\s+(.+)$"`
+- `VALOR_RE`: `r"^(-?\d{1,3}(?:\.\d{3})*,\d{2})$"`
+
+### 3. Indexação Semântica (`SemanticIndexBuilder`)
+
+**Objetivo**: Criar índice vetorial FAISS para busca semântica de termos textuais.
+
+**Processo detalhado**:
+1. **Extração de termos**: Coleta termos únicos de colunas textuais (`conta_nome`, `historico`)
+2. **Normalização**: Remove acentos, converte para minúscula, filtra stopwords
+3. **Filtragem**: Remove termos muito curtos (< 3 chars) e stopwords em português
+4. **Geração de embeddings**: Usa Sentence Transformers para converter termos em vetores
+5. **Construção do índice**: Cria índice FAISS para busca vetorial eficiente
+6. **Persistência**: Salva índice binário (.faiss) e metadados JSON (.json)
+
+**Modelo padrão**: `paraphrase-multilingual-mpnet-base-v2` (suporte português)
+**Dimensão dos vetores**: 768 (depende do modelo)
+**Métricas de busca**: Similaridade cosseno
+
+**Arquivos gerados**:
+- `semantic_terms.faiss`: Índice vetorial FAISS
+- `semantic_terms.json`: Mapeamento termo → embedding + metadados
+
+**Configuração**:
+- `semantic_enabled`: Habilita/desabilita indexação (padrão: true)
+- `semantic_model_name`: Modelo de embeddings
+- `semantic_local_files_only`: Força uso de modelos locais (padrão: true)
+
+### Fluxo de Dados Completo
+
+```
+PDFs em data/raw/
+    ↓
+PDFLoader.load()
+    ↓ [DataFrame bruto por página]
+data/processed/ingestion.parquet
+    ↓
+parse_ledger_dataframe()
+    ↓ [DataFrame estruturado por lançamento]
+data/processed/razao_contabil.parquet
+    ↓
+SemanticIndexBuilder.build()
+    ↓ [Índice vetorial + metadados]
+data/processed/semantic_terms.faiss
+data/processed/semantic_terms.json
+```
+
+### Diagrama da Pipeline
+
+```mermaid
+graph TD
+    A[PDFs em data/raw] --> B[PDFLoader]
+    B --> C[Extração de Texto<br/>+ OCR se necessário]
+    C --> D[DataFrame Bruto<br/>ingestion.parquet]
+    D --> E[ledger_parser]
+    E --> F[Parsing Estruturado<br/>Regex + Estado]
+    F --> G[DataFrame Estruturado<br/>razao_contabil.parquet]
+    G --> H[SemanticIndexBuilder]
+    H --> I[Extração de Termos<br/>Normalização]
+    I --> J[Geração de Embeddings<br/>Sentence Transformers]
+    J --> K[Índice FAISS<br/>semantic_terms.faiss]
+    J --> L[Metadados JSON<br/>semantic_terms.json]
+    
+    style A fill:#e1f5fe
+    style G fill:#c8e6c9
+    style K fill:#fff3e0
+    style L fill:#fff3e0
+```
+
+### Configurações Avançadas
+
+**Seleção de colunas estruturadas**:
+```bash
+--structured-columns cabecalho,periodo_inicio,cnpj,conta_codigo,data_lancamento,historico,valor
+```
+
+**Controle de indexação semântica**:
+```bash
+--semantic-enabled true \
+--semantic-model-name paraphrase-multilingual-mpnet-base-v2 \
+--semantic-index-path data/processed/custom_index.faiss
+```
+
+### Performance e Otimização
+
+- **Compressão**: Arquivos Parquet usam Snappy compression
+- **Memória**: Processamento em chunks para PDFs grandes
+- **Paralelização**: Múltiplos PDFs processados sequencialmente
+- **Cache**: Modelos de embeddings são cacheados localmente
+- **Fallback**: OCR opcional permite processamento sem `unstructured`
+
+### Tratamento de Erros
+
+- **PDFs corrompidos**: Pulados com log de aviso
+- **Parsing falha**: Documentos problemáticos geram warnings, não interrompem pipeline
+- **Modelo indisponível**: Indexação semântica desabilitada automaticamente
+- **Espaço em disco**: Verificação de espaço antes de salvar arquivos grandes
+
+### Schema de Dados
+
+**DataFrame Bruto (ingestion.parquet)**:
+```python
+{
+    "id": int,              # ID sequencial da página
+    "metadata": dict,       # Metadados do PDF (autor, data, página, etc.)
+    "page_content": str,    # Texto extraído da página
+    "type": str            # Tipo do documento ("Document")
+}
+```
+
+**DataFrame Estruturado (razao_contabil.parquet)**:
+```python
+{
+    "cabecalho": str,           # Título do relatório
+    "periodo_inicio": str,      # Data início período (DD/MM/YYYY)
+    "periodo_fim": str,         # Data fim período (DD/MM/YYYY)  
+    "cnpj": str,                # CNPJ da empresa
+    "conta_codigo": str,        # Código contábil (XX.XX.XX)
+    "conta_nome": str,          # Nome da conta contábil
+    "data_lancamento": str,     # Data do lançamento (DD/MM/YYYY)
+    "historico": str,           # Descrição do lançamento
+    "valor": float,             # Valor do lançamento
+    "total_debito": float,      # Total de débito da conta
+    "arquivo": str,             # Nome do arquivo PDF origem
+    "source": str,              # Caminho completo do PDF
+    "pagina": int               # Número da página
+}
+```
+
+**Índice Semântico**:
+- **semantic_terms.faiss**: Índice vetorial FAISS para busca rápida
+- **semantic_terms.json**: Metadados com mapeamento termo → informações
+
+### Monitoramento e Debug
+
+O pipeline imprime progresso detalhado:
+```
+🚀 Iniciando pipeline de ingestão...
+📄 Carregando PDFs...
+   Processando arquivo: razao_contabil_q1.pdf
+   🖼️  Detectado PDF de imagem, aplicando OCR...
+   ✓ 15 páginas processadas
+✅ Parquet bruto salvo em data/processed/ingestion.parquet
+🧾 Estruturando lançamentos contábeis...
+✅ Parquet estruturado salvo em data/processed/razao_contabil.parquet
+🧠 Gerando índice semântico...
+✅ Índice semântico salvo (1,247 termos indexados)
+```
+
 ## Estrutura do projeto
 
 - `src/loaders/pdf_loader.py`: responsável por localizar PDFs, fazer o parsing com PyMuPDF e, quando necessário, aplicar OCR com `unstructured.partition.pdf`.
@@ -190,7 +406,13 @@ Configuração opcional via `.env`:
 - `SEMANTIC_MODEL_NAME=paraphrase-multilingual-mpnet-base-v2` define o modelo de embeddings.
 - `SEMANTIC_INDEX_PATH=data/processed/semantic_terms.faiss` caminho do índice vetorial.
 - `SEMANTIC_TERMS_PATH=data/processed/semantic_terms.json` caminho dos termos/metadados.
-- `SEMANTIC_LOCAL_FILES_ONLY=true` evita download de modelo em runtime.
+- `SEMANTIC_LOCAL_FILES_ONLY=true` força o `sentence-transformers` a usar somente modelos já
+  disponíveis localmente (sem download).
+- Se `SEMANTIC_LOCAL_FILES_ONLY=true` e o modelo não estiver no cache local:
+  - Na ingestão, a criação do índice falha e o pipeline segue sem o índice.
+  - No chatbot, a expansão semântica é desativada e o matching cai para o modo lexical.
+- Se `SEMANTIC_LOCAL_FILES_ONLY=false`, o modelo pode ser baixado do hub automaticamente
+  quando não existir no cache local.
 - Se o índice vetorial não existir, o chatbot cai automaticamente para matching lexical.
 
 ### Sequência de execução (Mermaid)

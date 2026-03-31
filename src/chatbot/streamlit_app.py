@@ -41,14 +41,16 @@ def build_sql_tool(parquet_path: str) -> SQLTool:
     Cria e retorna uma instância do SQLTool configurada para o arquivo Parquet especificado.
 
     Esta função é decorada com @st.cache_resource para otimizar o desempenho,
-    evitando recriar o SQLTool a cada interação.
+    evitando recriar o SQLTool a cada interação do usuário. O SQLTool inclui
+    configuração de LLM (Ollama/OpenAI), matcher semântico e conexão DuckDB.
 
     Args:
-        parquet_path (str): Caminho absoluto para o arquivo Parquet estruturado
-                           contendo os dados contábeis.
+        parquet_path: Caminho absoluto para o arquivo Parquet estruturado
+            contendo os dados contábeis processados pelo pipeline.
 
     Returns:
-        SQLTool: Instância configurada do SQLTool pronta para processar perguntas.
+        Instância configurada do SQLTool pronta para processar perguntas
+        em linguagem natural sobre os dados contábeis.
     """
     return SQLTool(parquet_path=parquet_path)
 

@@ -1,5 +1,26 @@
 from __future__ import annotations
 
+"""
+Módulo SQLTool para chatbot de consultas em dados contábeis.
+
+Este módulo implementa a classe SQLTool, que fornece uma interface de agente
+baseada em LangChain para gerar e executar consultas SQL em dados estruturados
+de lançamentos contábeis armazenados em Parquet. O agente utiliza um LLM
+(Ollama ou OpenAI) para interpretar perguntas em linguagem natural e converter
+em SQL seguro, com validação e execução controlada.
+
+Funcionalidades principais:
+- Geração automática de SQL a partir de perguntas em português
+- Validação de segurança para prevenir comandos destrutivos
+- Execução read-only em DuckDB com limite de linhas
+- Suporte a matching semântico para termos textuais
+- Expansão de termos via índice vetorial FAISS
+- Interface de ferramentas LangChain para fluxo passo-a-passo
+- Debug trace para inspeção de SQLs geradas
+
+O agente segue um fluxo obrigatório: schema -> generate -> validate -> execute -> fix.
+"""
+
 import json
 import os
 import re
@@ -40,6 +61,21 @@ except Exception:  # pragma: no cover
 
 @dataclass
 class SQLToolResult:
+    """
+    Resultado de uma consulta executada pelo SQLTool.
+
+    Esta classe encapsula todas as informações retornadas após o processamento
+    de uma pergunta pelo agente SQL, incluindo a resposta final, a SQL executada,
+    métricas de execução e dados de debug para inspeção.
+
+    Atributos:
+        question: A pergunta original feita pelo usuário em linguagem natural.
+        sql: A consulta SQL final que foi executada (após validação e correções).
+        answer: A resposta formatada em português para o usuário.
+        row_count: Número de linhas retornadas pela consulta SQL.
+        generated_sqls: Lista de todas as SQLs geradas durante o processo (incluindo tentativas).
+        debug_trace: Lista de mensagens de debug detalhando o fluxo de execução.
+    """
     question: str
     sql: str
     answer: str
@@ -49,9 +85,57 @@ class SQLToolResult:
 
 
 class SQLTool:
-    """SQL Agent com tools dedicadas: schema, generate, validate, execute e fix."""
+    """
+    Agente SQL para consultas em dados contábeis usando LangChain e DuckDB.
+
+    Esta classe implementa um agente inteligente que converte perguntas em linguagem
+    natural sobre dados contábeis em consultas SQL seguras e executáveis. Utiliza
+    um LLM (Ollama ou OpenAI) para geração de SQL, com ferramentas dedicadas para
+    cada etapa do processo: obtenção de schema, geração, validação, execução e
+    correção de erros.
+
+    O agente opera em modo read-only, garantindo segurança, e inclui suporte a
+    matching semântico para melhorar a precisão de filtros textuais através de
+    expansão de termos via índice vetorial FAISS.
+
+    Fluxo de operação:
+    1. Interpretação da pergunta e extração de termos
+    2. Tentativa de consulta determinística baseada em regras (para casos simples)
+    3. Se necessário, uso do agente LLM: schema -> generate -> validate -> execute
+    4. Correção automática de erros SQL (até 3 tentativas)
+    5. Formatação da resposta final em português
+
+    Configuração via variáveis de ambiente:
+    - LLM_PROVIDER: 'openai' ou 'ollama' (padrão: auto-detect)
+    - OPENAI_API_KEY: chave da API OpenAI
+    - OPENAI_MODEL: modelo OpenAI (padrão: gpt-4.1-mini)
+    - LLM/llm: modelo Ollama (padrão: qwen3)
+    - SEMANTIC_MATCH_ENABLED: habilita matching semântico (padrão: true)
+    - SEMANTIC_MODEL_NAME: modelo de embeddings (padrão: paraphrase-multilingual-mpnet-base-v2)
+    """
 
     def __init__(self, parquet_path: str, database_path: str = ":memory:") -> None:
+        """
+        Inicializa o SQLTool com caminho para dados Parquet e configuração de banco.
+
+        Configura a conexão DuckDB, registra views necessárias, inicializa o matcher
+        semântico se disponível, e constrói o agente LangChain com LLM e ferramentas.
+
+        Args:
+            parquet_path: Caminho absoluto ou relativo ao arquivo Parquet com dados
+                estruturados de lançamentos contábeis. Será resolvido relativo à raiz
+                do projeto se necessário.
+            database_path: Caminho para o banco DuckDB. Padrão ":memory:" para modo
+                efêmero. Use caminho de arquivo para persistência.
+
+        Raises:
+            RuntimeError: Se dependências LangChain não estiverem instaladas ou
+                se configuração de LLM for inválida.
+
+        Note:
+            O método configura automaticamente o provider LLM baseado em variáveis
+            de ambiente: prioriza OpenAI se chave presente, senão Ollama local.
+        """
         # Resolve o caminho do parquet com base no root do projeto para evitar
         # problemas quando o app é iniciado de diretórios diferentes.
         self.parquet_path = self._resolve_path(parquet_path)
@@ -776,6 +860,30 @@ ORDER BY data_lancamento, conta_nome
         return None
 
     def ask_sql(self, question: str) -> dict[str, Any]:
+        """
+        Processa uma pergunta em linguagem natural e retorna resultado estruturado.
+
+        Este é o método principal que coordena todo o fluxo de processamento:
+        1. Tenta resposta determinística baseada em regras para casos simples
+        2. Se necessário, invoca o agente LangChain para geração de SQL via LLM
+        3. Executa a SQL validada e formata resposta em português
+        4. Coleta métricas de execução e debug trace
+
+        Args:
+            question: Pergunta do usuário em linguagem natural (português).
+
+        Returns:
+            Dicionário com chaves:
+            - answer: Resposta formatada para o usuário
+            - sql: SQL final executada (string)
+            - row_count: Número de linhas retornadas (int)
+            - generated_sqls: Lista de SQLs geradas durante o processo (list[str])
+            - debug_trace: Lista de mensagens de debug (list[str])
+
+        Note:
+            O método prioriza respostas rápidas via regras para queries simples
+            (listagem, totais) antes de usar o LLM para casos complexos.
+        """
         # Inicia execução limpa para a pergunta atual e registra no trace.
         self._reset_debug_state()
         self._add_debug(f"Pergunta: {question}")
@@ -808,6 +916,19 @@ ORDER BY data_lancamento, conta_nome
         }
 
     def ask(self, question: str) -> SQLToolResult:
+        """
+        Interface principal para o chatbot Streamlit.
+
+        Processa uma pergunta e retorna um objeto estruturado com todos os
+        detalhes da execução, adequado para exibição na interface do usuário.
+
+        Args:
+            question: Pergunta do usuário em linguagem natural.
+
+        Returns:
+            SQLToolResult contendo pergunta, resposta, SQL executada,
+            métricas e dados de debug para inspeção.
+        """
         # Método de alto nível usado pelo Streamlit.
         result = self.ask_sql(question)
         return SQLToolResult(
@@ -820,5 +941,11 @@ ORDER BY data_lancamento, conta_nome
         )
 
     def close(self) -> None:
+        """
+        Encerra a conexão com o banco DuckDB e libera recursos.
+
+        Deve ser chamado quando o SQLTool não for mais utilizado para
+        garantir que conexões e arquivos temporários sejam fechados adequadamente.
+        """
         # Encerra conexão explícita para liberar recursos.
         self.conn.close()
