@@ -127,9 +127,30 @@ if question:
                 # Trata erros ocorridos durante a consulta
                 error_message = f"Não consegui concluir a consulta: {exc}"
                 st.error(error_message)
+                if debug_mode:
+                    debug_state = sql_tool.debug_state()
+                    if debug_state.get("sql"):
+                        with st.expander("SQL executado (parcial)", expanded=False):
+                            st.code(debug_state["sql"], language="sql")
+                    if debug_state.get("generated_sqls"):
+                        with st.expander(
+                            f"SELECTs gerados ({len(debug_state['generated_sqls'])})",
+                            expanded=False,
+                        ):
+                            for idx, generated_sql in enumerate(
+                                debug_state["generated_sqls"], start=1
+                            ):
+                                st.caption(f"Tentativa {idx}")
+                                st.code(generated_sql, language="sql")
+                    if debug_state.get("debug_trace"):
+                        with st.expander("Trace debug", expanded=False):
+                            st.text("\n".join(debug_state["debug_trace"]))
                 st.session_state.messages.append(
                     {
                         "role": "assistant",
                         "content": error_message,
+                        "sql": sql_tool.debug_state().get("sql", ""),
+                        "generated_sqls": sql_tool.debug_state().get("generated_sqls", []),
+                        "debug_trace": sql_tool.debug_state().get("debug_trace", []),
                     }
                 )

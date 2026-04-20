@@ -9,14 +9,14 @@ de lançamentos contábeis armazenados em Parquet. O agente utiliza um LLM
 (Ollama ou OpenAI) para interpretar perguntas em linguagem natural e converter
 em SQL seguro, com validação e execução controlada.
 
-Funcionalidades principais:
-- Geração automática de SQL a partir de perguntas em português
-- Validação de segurança para prevenir comandos destrutivos
-- Execução read-only em DuckDB com limite de linhas
-- Suporte a matching semântico para termos textuais
-- Expansão de termos via índice vetorial FAISS
-- Interface de ferramentas LangChain para fluxo passo-a-passo
-- Debug trace para inspeção de SQLs geradas
+    Funcionalidades principais:
+    - Geração automática de SQL a partir de perguntas em português
+    - Validação de segurança para prevenir comandos destrutivos
+    - Execução read-only em DuckDB com limite de linhas
+    - Suporte a matching semântico para termos textuais
+    - Expansão de termos via índice vetorial FAISS
+    - Interface de ferramentas LangChain para fluxo passo-a-passo
+    - Debug trace para inspeção de SQLs geradas
 
 O agente segue um fluxo obrigatório: schema -> generate -> validate -> execute -> fix.
 """
@@ -100,10 +100,9 @@ class SQLTool:
 
     Fluxo de operação:
     1. Interpretação da pergunta e extração de termos
-    2. Tentativa de consulta determinística baseada em regras (para casos simples)
-    3. Se necessário, uso do agente LLM: schema -> generate -> validate -> execute
-    4. Correção automática de erros SQL (até 3 tentativas)
-    5. Formatação da resposta final em português
+    2. Uso do agente LLM: schema -> generate -> validate -> execute
+    3. Correção automática de erros SQL (até 3 tentativas)
+    4. Formatação da resposta final em português
 
     Configuração via variáveis de ambiente:
     - LLM_PROVIDER: 'openai' ou 'ollama' (padrão: auto-detect)
@@ -134,7 +133,8 @@ class SQLTool:
 
         Note:
             O método configura automaticamente o provider LLM baseado em variáveis
-            de ambiente: prioriza OpenAI se chave presente, senão Ollama local.
+            de ambiente: prioriza OpenAI se `OPENAI_MODEL` ou `OPENAI_API_KEY` estiverem
+            presentes (ou se `LLM_PROVIDER=openai`), senão usa Ollama local.
         """
         # Resolve o caminho do parquet com base no root do projeto para evitar
         # problemas quando o app é iniciado de diretórios diferentes.
@@ -154,6 +154,18 @@ class SQLTool:
         self._semantic_local_files_only = (
             os.getenv("SEMANTIC_LOCAL_FILES_ONLY", "true").lower() == "true"
         )
+        self._semantic_min_score = float(os.getenv("SEMANTIC_MIN_SCORE", "0.6"))
+        self._semantic_top_k = int(os.getenv("SEMANTIC_TOP_K", "4"))
+        self._semantic_min_token_len = int(os.getenv("SEMANTIC_MIN_TOKEN_LEN", "4"))
+        self._semantic_require_term_in_vocab = (
+            os.getenv("SEMANTIC_REQUIRE_TERM_IN_VOCAB", "true").lower() != "false"
+        )
+        raw_excludes = os.getenv("SEMANTIC_EXCLUDE_TERMS", "")
+        self._semantic_exclude_terms = {
+            term.strip().lower()
+            for term in raw_excludes.split(",")
+            if term.strip()
+        }
         self._semantic_model_name_from_env = os.getenv("SEMANTIC_MODEL_NAME")
         self._semantic_model_name = (
             self._semantic_model_name_from_env or "paraphrase-multilingual-mpnet-base-v2"
@@ -169,6 +181,7 @@ class SQLTool:
         self._semantic_model: Any = None
         self._semantic_index: Any = None
         self._semantic_terms: list[str] = []
+        self._semantic_terms_set: set[str] = set()
         self._llm_provider_name = "ollama"
         self._llm_model_name = os.getenv("LLM") or os.getenv("llm") or "qwen3"
         self._register_views()
@@ -233,14 +246,15 @@ class SQLTool:
         # Provider pode ser forçado via LLM_PROVIDER=openai|ollama.
         llm_provider = (os.getenv("LLM_PROVIDER") or "").strip().lower()
         openai_api_key = os.getenv("OPENAI_API_KEY")
+        openai_model_env = os.getenv("OPENAI_MODEL")
         openai_model = (
-            os.getenv("OPENAI_MODEL")
+            openai_model_env
             or os.getenv("LLM")
             or os.getenv("llm")
             or "gpt-4.1-mini"
         )
         use_openai = llm_provider == "openai" or (
-            llm_provider == "" and bool(openai_api_key)
+            llm_provider == "" and (bool(openai_api_key) or bool(openai_model_env))
         )
 
         if use_openai:
@@ -248,6 +262,11 @@ class SQLTool:
                 raise RuntimeError(
                     "Para usar OpenAI, instale `langchain-openai` "
                     "(ex.: pip install langchain-openai)."
+                )
+            if not openai_api_key:
+                raise RuntimeError(
+                    "OPENAI_MODEL definido, mas OPENAI_API_KEY não encontrado. "
+                    "Configure a chave ou defina LLM_PROVIDER=ollama para usar o modelo local."
                 )
             self._llm_provider_name = "openai"
             self._llm_model_name = openai_model
@@ -267,6 +286,14 @@ class SQLTool:
 
     def llm_description(self) -> str:
         return f"{self._llm_provider_name}:{self._llm_model_name}"
+
+    def debug_state(self) -> dict[str, Any]:
+        return {
+            "sql": self._last_executed_sql,
+            "row_count": self._last_row_count,
+            "generated_sqls": list(self._generated_sqls),
+            "debug_trace": list(self._debug_trace),
+        }
 
     def schema_description(self) -> str:
         # Converte o DESCRIBE em texto para alimentar prompts e inspeção.
@@ -299,6 +326,11 @@ Regras:
 - Para "valor/total de débito ...", prefira `SUM(total_debito)` como métrica principal.
 - Para termos textuais com variação morfológica (ex.: telefone, telefonia, telefônica),
   prefira buscar por radical estável com `LIKE` (ex.: `'%telefon%'`) em vez de match literal.
+- Para perguntas sobre períodos, use `periodo_inicio` e `periodo_fim` e formate datas como `YYYY-MM-DD`.
+- Se a pergunta for "qual período" ou "de qual período", responda com um intervalo usando `MIN(periodo_inicio)` e `MAX(periodo_fim)`.
+- Se a pergunta pedir "listar períodos", use `SELECT DISTINCT periodo_inicio, periodo_fim` com `ORDER BY periodo_inicio, periodo_fim`.
+- Exemplo (qual período): `SELECT MIN(periodo_inicio) AS periodo_inicio_min, MAX(periodo_fim) AS periodo_fim_max FROM lancamentos;`
+- Exemplo (listar períodos): `SELECT DISTINCT periodo_inicio, periodo_fim FROM lancamentos ORDER BY periodo_inicio, periodo_fim;`
 - Se não houver resultado, informe explicitamente.
 """
 
@@ -448,6 +480,7 @@ Regras:
 
             self._semantic_index = index
             self._semantic_terms = [str(term) for term in terms]
+            self._semantic_terms_set = {term.lower() for term in self._semantic_terms}
             return True
         except Exception:
             return False
@@ -466,7 +499,7 @@ Regras:
             self._semantic_model = None
         return self._semantic_model
 
-    def _semantic_expand_terms(self, terms: list[str], top_k: int = 6) -> dict[str, list[str]]:
+    def _semantic_expand_terms(self, terms: list[str], top_k: int | None = None) -> dict[str, list[str]]:
         # Para cada termo da pergunta, recupera termos semanticamente próximos
         # presentes no vocabulário do dataset.
         if not terms or self._semantic_index is None or np is None:
@@ -476,11 +509,18 @@ Regras:
             return {}
 
         expanded: dict[str, list[str]] = {}
-        max_k = min(top_k, len(self._semantic_terms))
+        k = top_k if top_k is not None else self._semantic_top_k
+        max_k = min(k, len(self._semantic_terms))
         if max_k <= 0:
             return expanded
 
         for term in terms:
+            if self._semantic_require_term_in_vocab and term not in self._semantic_terms_set:
+                continue
+            if len(term) < self._semantic_min_token_len:
+                continue
+            if term in self._semantic_exclude_terms:
+                continue
             try:
                 query_vec = model.encode(
                     [term],
@@ -498,7 +538,7 @@ Regras:
                     continue
                 candidate = self._semantic_terms[idx]
                 # Score de cosseno em embeddings normalizados.
-                if float(score) < 0.45:
+                if float(score) < self._semantic_min_score:
                     continue
                 if candidate == term:
                     continue
@@ -513,14 +553,26 @@ Regras:
 
     def get_database_schema(self, table_name: str | None = None) -> str:
         # Mantém escopo controlado: apenas uma tabela de estudo.
-        if table_name and table_name.strip().lower() != "lancamentos":
+        safe_table_name = self._coerce_text(table_name).strip()
+        if safe_table_name and safe_table_name.lower() != "lancamentos":
             return "Error: Somente a tabela 'lancamentos' está disponível."
         return self.schema_description()
 
     @staticmethod
+    def _coerce_text(value) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (list, tuple)):
+            parts = [str(item) for item in value if item is not None]
+            return " ".join(parts)
+        return str(value)
+
+    @staticmethod
     def _cleanup_sql(query: str) -> str:
         # Remove blocos markdown que o modelo pode incluir por engano.
-        clean_query = (query or "").strip()
+        clean_query = SQLTool._coerce_text(query).strip()
         clean_query = re.sub(r"```sql\s*", "", clean_query, flags=re.IGNORECASE)
         clean_query = re.sub(r"```\s*", "", clean_query)
         return clean_query.strip()
@@ -554,7 +606,7 @@ Regras:
     def validate_sql_query(self, query: str) -> str:
         # Gate de segurança: bloqueia instruções perigosas e mantém o app
         # estritamente em modo leitura, mesmo quando a SQL veio de LLM.
-        clean_query = self._cleanup_sql(query)
+        clean_query = self._cleanup_sql(self._coerce_text(query))
         self._add_debug(f"validate_sql_query input: {clean_query}")
         if not clean_query:
             return "Error: Query vazia."
@@ -595,9 +647,10 @@ Regras:
     def execute_sql_query(self, query: str, max_rows: Optional[int] = 200) -> pd.DataFrame:
         # Aceita query crua ou o retorno de validação no formato "Valid: ...".
         # Isso simplifica o encadeamento entre tools no agente.
-        clean_query = self._cleanup_sql(query)
+        clean_query = self._cleanup_sql(self._coerce_text(query))
         if clean_query.startswith("Valid:"):
             clean_query = clean_query[6:].strip()
+        clean_query = clean_query.strip().rstrip(";")
 
         # LIMIT automático para não explodir a UI com milhares de linhas.
         # Exceção: consultas agregadas (SUM/COUNT/AVG/MIN/MAX) não recebem LIMIT,
@@ -624,9 +677,9 @@ Regras:
         schema = self.get_database_schema()
         prompt = f"""
 A query abaixo falhou:
-Query: {original_query}
-Erro: {error_message}
-Pergunta original: {question}
+Query: {self._coerce_text(original_query)}
+Erro: {self._coerce_text(error_message)}
+Pergunta original: {self._coerce_text(question)}
 
 Schema:
 {schema}
@@ -645,15 +698,28 @@ Corrija a SQL mantendo as regras:
         # Estas funções são expostas ao agente LangChain como "ferramentas".
         # O modelo escolhe a sequência (gerar -> validar -> executar -> corrigir)
         # e cada etapa fica isolada para facilitar depuração e controle.
+        def _coerce_text(value) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, str):
+                return value
+            if isinstance(value, (list, tuple)):
+                parts = [str(item) for item in value if item is not None]
+                return " ".join(parts)
+            return str(value)
+
         @tool
         def get_database_schema(table_name: str = "") -> str:
             """Get database schema information for SQL query generation."""
-            return self.get_database_schema(table_name.strip() or None)
+            safe_table_name = _coerce_text(table_name).strip()
+            return self.get_database_schema(safe_table_name or None)
 
         @tool
         def generate_sql_query(question: str, schema_info: str = "") -> str:
             """Generate SQL query from natural language question."""
-            return self.generate_sql_query(question=question, schema_info=schema_info)
+            safe_question = _coerce_text(question)
+            safe_schema_info = _coerce_text(schema_info)
+            return self.generate_sql_query(question=safe_question, schema_info=safe_schema_info)
 
         @tool
         def validate_sql_query(query: str) -> str:
@@ -730,142 +796,13 @@ Corrija a SQL mantendo as regras:
                 terms.append(token)
         return terms
 
-    def _try_rule_based_query(self, question: str) -> dict[str, Any] | None:
-        normalized = self._normalize_text(question)
-        terms = self._extract_query_terms(normalized)
-        if not terms:
-            return None
-
-        conta_norm = self._normalized_sql_text("conta_nome")
-        historico_norm = self._normalized_sql_text("historico")
-        semantic_terms = self._semantic_expand_terms(terms)
-
-        term_clauses: list[str] = []
-        for term in terms:
-            # Usa o próprio termo + similares semânticos no mesmo grupo.
-            # Cada grupo segue obrigatório (AND entre grupos; OR dentro do grupo).
-            alternatives = [term]
-            alternatives.extend(semantic_terms.get(term, []))
-
-            like_parts: list[str] = []
-            for alternative in alternatives:
-                stem = alternative[:7] if len(alternative) > 7 else alternative
-                like_parts.append(f"({conta_norm} LIKE '%{stem}%')")
-                like_parts.append(f"({historico_norm} LIKE '%{stem}%')")
-
-            group_sql = " OR ".join(like_parts)
-            term_clauses.append(f"({group_sql})")
-        text_filter = " AND ".join(term_clauses)
-
-        list_intent = any(
-            token in normalized
-            for token in ("liste", "listar", "list", "mostre", "mostrar", "quais", "contas")
-        )
-        total_debito_intent = (
-            any(token in normalized for token in ("total", "soma", "somar"))
-            and "debito" in normalized
-        )
-        total_gasto_intent = (
-            any(token in normalized for token in ("total", "soma", "somar"))
-            and any(token in normalized for token in ("gasto", "gastos", "valor", "valores"))
-            and "debito" not in normalized
-        )
-
-        if total_debito_intent:
-            sql = f"""
-SELECT
-  SUM(total_debito) AS total_debito,
-  COUNT(*) AS linhas
-FROM lancamentos
-WHERE {text_filter}
-""".strip()
-            self._track_generated_sql(sql, "rule_based")
-            df = self.execute_sql_query(sql, max_rows=200)
-            if df.empty:
-                return None
-            total = df.iloc[0].get("total_debito")
-            linhas = int(df.iloc[0].get("linhas", 0))
-            total_num = float(total) if total is not None else 0.0
-            return {
-                "answer": f"Total de débito para filtro textual ({', '.join(terms)}): {total_num:.2f} ({linhas} linhas).",
-                "sql": self._last_executed_sql,
-                "row_count": self._last_row_count,
-                "generated_sqls": self._generated_sqls,
-                "debug_trace": self._debug_trace,
-            }
-
-        if total_gasto_intent:
-            sql = f"""
-SELECT
-  SUM(ABS(valor)) AS total_gasto,
-  SUM(valor) AS saldo_valor,
-  COUNT(*) AS linhas
-FROM lancamentos
-WHERE {text_filter}
-""".strip()
-            self._track_generated_sql(sql, "rule_based")
-            df = self.execute_sql_query(sql, max_rows=200)
-            if df.empty:
-                return None
-            total = df.iloc[0].get("total_gasto")
-            saldo = df.iloc[0].get("saldo_valor")
-            linhas = int(df.iloc[0].get("linhas", 0))
-            total_num = float(total) if total is not None else 0.0
-            saldo_num = float(saldo) if saldo is not None else 0.0
-            return {
-                "answer": (
-                    f"Total gasto para filtro textual ({', '.join(terms)}): {total_num:.2f} "
-                    f"(saldo em valor: {saldo_num:.2f}; {linhas} linhas)."
-                ),
-                "sql": self._last_executed_sql,
-                "row_count": self._last_row_count,
-                "generated_sqls": self._generated_sqls,
-                "debug_trace": self._debug_trace,
-            }
-
-        if list_intent:
-            sql = f"""
-SELECT
-  data_lancamento,
-  conta_nome,
-  historico,
-  valor,
-  total_debito
-FROM lancamentos
-WHERE {text_filter}
-ORDER BY data_lancamento, conta_nome
-""".strip()
-            self._track_generated_sql(sql, "rule_based")
-            df = self.execute_sql_query(sql, max_rows=200)
-            if df.empty:
-                return {
-                    "answer": f"Não encontrei lançamentos para o filtro textual ({', '.join(terms)}).",
-                    "sql": self._last_executed_sql,
-                    "row_count": self._last_row_count,
-                    "generated_sqls": self._generated_sqls,
-                    "debug_trace": self._debug_trace,
-                }
-            table_md = self._dataframe_to_markdown(df)
-            return {
-                "answer": (
-                    f"Encontrei {len(df)} lançamentos para o filtro textual ({', '.join(terms)}):\n\n"
-                    f"{table_md}"
-                ),
-                "sql": self._last_executed_sql,
-                "row_count": self._last_row_count,
-                "generated_sqls": self._generated_sqls,
-                "debug_trace": self._debug_trace,
-            }
-
-        return None
-
     def ask_sql(self, question: str) -> dict[str, Any]:
         """
         Processa uma pergunta em linguagem natural e retorna resultado estruturado.
 
         Este é o método principal que coordena todo o fluxo de processamento:
-        1. Tenta resposta determinística baseada em regras para casos simples
-        2. Se necessário, invoca o agente LangChain para geração de SQL via LLM
+        1. Normaliza a pergunta, extrai termos e expande via índice vetorial
+        2. Invoca o agente LangChain para geração de SQL via LLM
         3. Executa a SQL validada e formata resposta em português
         4. Coleta métricas de execução e debug trace
 
@@ -881,24 +818,24 @@ ORDER BY data_lancamento, conta_nome
             - debug_trace: Lista de mensagens de debug (list[str])
 
         Note:
-            O método prioriza respostas rápidas via regras para queries simples
-            (listagem, totais) antes de usar o LLM para casos complexos.
+            O método sempre utiliza o LLM para geração da SQL.
         """
         # Inicia execução limpa para a pergunta atual e registra no trace.
         self._reset_debug_state()
         self._add_debug(f"Pergunta: {question}")
-
-        rule_based_result = self._try_rule_based_query(question)
-        if rule_based_result is not None:
-            self._add_debug("Resposta via fallback determinístico.")
-            return rule_based_result
+        normalized = self._normalize_text(question)
+        terms = self._extract_query_terms(normalized)
+        self._add_debug(f"Pergunta normalizada: {normalized}")
+        if terms:
+            self._add_debug(f"Termos extraídos: {', '.join(terms)}")
+        llm_question = question
 
         # Consumimos o stream de eventos do agente e ignoramos mensagens
         # intermediárias de tool-call para retornar apenas a resposta final.
         # A SQL efetivamente executada fica em `_last_executed_sql`.
         final_answer = ""
 
-        for event in self.sql_agent.stream({"messages": question}, stream_mode="values"):
+        for event in self.sql_agent.stream({"messages": llm_question}, stream_mode="values"):
             msg = event["messages"][-1]
             tool_calls = getattr(msg, "tool_calls", None)
             if tool_calls:
@@ -907,6 +844,52 @@ ORDER BY data_lancamento, conta_nome
             if content:
                 final_answer = content
 
+        if self._last_executed_sql:
+            self._add_debug("postprocess: forçando resposta baseada em SQL executado.")
+            try:
+                df = self.execute_sql_query(self._last_executed_sql)
+                period_answer = self._format_period_answer(df)
+                if period_answer:
+                    final_answer = period_answer
+                elif df.empty:
+                    final_answer = "Consulta executada, mas não encontrei resultados."
+                else:
+                    table_md = self._dataframe_to_markdown(df)
+                    final_answer = table_md or "Consulta executada com sucesso."
+            except Exception as exc:
+                self._add_debug(f"postprocess: falha ao reexecutar SQL: {exc}")
+
+        if not self._last_executed_sql:
+            self._add_debug("fallback: agente não executou SQL; usando fluxo direto (generate -> validate -> execute).")
+            sql = self.generate_sql_query(question=question, schema_info=self.get_database_schema())
+            last_error = ""
+            for attempt in range(3):
+                validation = self.validate_sql_query(sql)
+                if not validation.startswith("Valid:"):
+                    last_error = validation
+                    sql = self.fix_sql_error(sql, validation, question)
+                    continue
+                try:
+                    df = self.execute_sql_query(validation)
+                    if df.empty:
+                        final_answer = "Consulta executada, mas não encontrei resultados."
+                    else:
+                        period_answer = self._format_period_answer(df)
+                        if period_answer:
+                            final_answer = period_answer
+                        else:
+                            table_md = self._dataframe_to_markdown(df)
+                            final_answer = table_md or "Consulta executada com sucesso."
+                    break
+                except Exception as exc:
+                    last_error = str(exc)
+                    sql = self.fix_sql_error(sql, last_error, question)
+            else:
+                final_answer = (
+                    "Não consegui gerar uma SQL válida após 3 tentativas."
+                    + (f" Último erro: {last_error}" if last_error else "")
+                )
+
         return {
             "answer": final_answer or "Não consegui gerar uma resposta.",
             "sql": self._last_executed_sql,
@@ -914,6 +897,35 @@ ORDER BY data_lancamento, conta_nome
             "generated_sqls": self._generated_sqls,
             "debug_trace": self._debug_trace,
         }
+
+    @staticmethod
+    def _format_period_answer(df: pd.DataFrame) -> str | None:
+        if df.empty:
+            return None
+        if "periodo_inicio" in df.columns and "periodo_fim" in df.columns:
+            if len(df) == 1:
+                row = df.iloc[0]
+                inicio = row.get("periodo_inicio")
+                fim = row.get("periodo_fim")
+                if inicio is None or fim is None:
+                    return None
+                return f"O período do documento é de {inicio} até {fim}."
+
+            name_col = "arquivo" if "arquivo" in df.columns else ("source" if "source" in df.columns else None)
+            lines = ["Períodos disponíveis por documento:"]
+            for _, row in df.iterrows():
+                inicio = row.get("periodo_inicio")
+                fim = row.get("periodo_fim")
+                if inicio is None or fim is None:
+                    continue
+                doc = row.get(name_col) if name_col else None
+                if doc:
+                    doc = Path(str(doc)).name
+                    lines.append(f"- {doc}: de {inicio} a {fim}")
+                else:
+                    lines.append(f"- de {inicio} a {fim}")
+            return "\n".join(lines) if len(lines) > 1 else None
+        return None
 
     def ask(self, question: str) -> SQLToolResult:
         """

@@ -460,4 +460,5 @@ sequenceDiagram
    - `Trace debug` para ver validação e execução.
 
 
+
 source ../../venv/chatbotduckdb/bin/activate
